@@ -53,6 +53,7 @@ import pandas as pd
 import lightgbm as lgb
 from datetime import datetime, timezone
 
+sys.path.append(os.path.dirname(__file__))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from gateway_okx_client import OKXGatewayClient
 from as_dynamic_risk import compute_adaptive_as_parameters
@@ -90,8 +91,12 @@ def log_msg(msg):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     line = f"[{ts}] [03_as_grid] {msg}"
     print(line, flush=True)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 running = True
 def handle_sigterm(signum, frame):
@@ -106,9 +111,12 @@ class AvellanedaStoikovMLExecutionKernel:
     def __init__(self, checkpoints_dir="/app/checkpoints"):
         self.checkpoints_dir = checkpoints_dir
         if not os.path.exists(self.checkpoints_dir):
-            alt_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../checkpoints"))
-            if os.path.exists(alt_dir):
-                self.checkpoints_dir = alt_dir
+            cand1 = os.path.abspath(os.path.join(os.path.dirname(__file__), "../checkpoints"))
+            cand2 = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../checkpoints"))
+            if os.path.exists(cand1):
+                self.checkpoints_dir = cand1
+            elif os.path.exists(cand2):
+                self.checkpoints_dir = cand2
             else:
                 self.checkpoints_dir = "/opt/nautilus_cluster/checkpoints"
 
@@ -194,6 +202,34 @@ class AvellanedaStoikovMLExecutionKernel:
         vol_ma = float(pd.Series(v).rolling(min(n, 20), min_periods=3).mean().bfill().iloc[-1])
         vol_accel = float(np.clip(v[-1] / (vol_ma + 1e-9), 0.01, 50.0))
 
+        # Causal ADX(14) calculation for structural macro-trend detection
+        if n >= 15:
+            delta_h = h[1:] - h[:-1]
+            delta_l = l[:-1] - l[1:]
+            plus_dm = np.where((delta_h > delta_l) & (delta_h > 0), delta_h, 0.0)
+            minus_dm = np.where((delta_l > delta_h) & (delta_l > 0), delta_l, 0.0)
+            
+            smooth_tr = pd.Series(tr[1:]).rolling(min(n-1, 14), min_periods=3).mean().bfill()
+            smooth_plus = pd.Series(plus_dm).rolling(min(n-1, 14), min_periods=3).mean().bfill()
+            smooth_minus = pd.Series(minus_dm).rolling(min(n-1, 14), min_periods=3).mean().bfill()
+            
+            plus_di = 100.0 * (smooth_plus / (smooth_tr + 1e-9))
+            minus_di = 100.0 * (smooth_minus / (smooth_tr + 1e-9))
+            dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
+            adx14 = float(dx.rolling(min(n-1, 14), min_periods=3).mean().bfill().iloc[-1])
+            curr_plus_di = float(plus_di.iloc[-1])
+            curr_minus_di = float(minus_di.iloc[-1])
+            
+            if curr_plus_di > curr_minus_di and c[-1] > ma20:
+                trend_dir = 1
+            elif curr_minus_di > curr_plus_di and c[-1] < ma20:
+                trend_dir = -1
+            else:
+                trend_dir = 0
+        else:
+            adx14 = 15.0
+            trend_dir = 0
+
         return {
             "p_vol": p_vol,
             "gk_vol": gk_vol,
@@ -202,7 +238,9 @@ class AvellanedaStoikovMLExecutionKernel:
             "s_r1": s_r1,
             "vol_accel": vol_accel,
             "close_px": float(c[-1]),
-            "ma20": ma20
+            "ma20": ma20,
+            "adx14": adx14,
+            "trend_dir": trend_dir
         }
 
     def compute_lob_orderbook_metrics(self, book_data):
@@ -284,38 +322,78 @@ class AvellanedaStoikovMLExecutionKernel:
 
         return pred_drift, pred_tox_down, pred_tox_up
 
-    def compute_as_grid_quotes(self, mid_price, gk_vol, inventory_contracts, mu_drift, p_tox_down, p_tox_up):
-        """Calculates Avellaneda-Stoikov reservation price, optimal half spreads, and quoting permissions for 35 USDT micro account."""
+    def compute_as_grid_quotes(
+        self,
+        mid_price,
+        gk_vol,
+        inventory_contracts,
+        mu_drift,
+        p_tox_down,
+        p_tox_up,
+        adx14=0.0,
+        trend_dir=0,
+        cooldown_bid=False,
+        cooldown_ask=False
+    ):
+        """Calculates Avellaneda-Stoikov quotes with smooth inventory skew, ADX trend protection, and post-fill cooldown."""
         sigma = max(0.10, gk_vol)
 
-        # 1. Aggressive Inventory Skew (Forced Inventory Rebalancing)
-        inventory_skew = inventory_contracts * self.gamma * (sigma ** 2) * mid_price * 0.005
+        # 1. Smooth Inventory Skew (Calibrated Reservation Price tilt, avoiding gamma blowouts)
+        inventory_skew = inventory_contracts * self.gamma * (sigma ** 2) * mid_price * 0.001
         drift_adjustment = self.alpha_drift * mu_drift * (mid_price * 0.0005)
         r = mid_price - inventory_skew + drift_adjustment
 
-        # 2. Optimal Base Half-Spread:
+        # 2. Optimal Base Half-Spread with mandatory fee hurdle
         base_half_spread = (1.0 / self.gamma) * math.log(1.0 + self.gamma / self.kappa) * (mid_price * 0.0006)
         min_half_spread = mid_price * (self.min_spread_bps / 10000.0)
         base_half_spread = max(min_half_spread, base_half_spread)
 
-        delta_bid = base_half_spread * (1.0 + self.beta_toxic * p_tox_down)
-        delta_ask = base_half_spread * (1.0 + self.beta_toxic * p_tox_up)
+        # 3. Smooth continuous inventory ratio in [-1.0, 1.0] (replaces suicidal mid ± 1.0 jumps)
+        inv_ratio = float(np.clip(inventory_contracts / max(self.max_inventory, 1e-6), -1.0, 1.0))
+        inv_bias = inv_ratio * base_half_spread * 0.75
 
-        # If inventory > 0, aggressively lower ask price to dump inventory instantly
+        # Asymmetric spreads: long inventory widens bid (less buying), narrows ask (more selling)
+        delta_bid = base_half_spread * (1.0 + self.beta_toxic * p_tox_down) + inv_bias
+        delta_ask = base_half_spread * (1.0 + self.beta_toxic * p_tox_up) - inv_bias
+
+        # Strict fee hurdle: half-spread must never fall below minimum fee threshold
+        delta_bid = max(min_half_spread * 0.8, delta_bid)
+        delta_ask = max(min_half_spread * 0.8, delta_ask)
+
         bid_px = round(r - delta_bid, 1)
         ask_px = round(r + delta_ask, 1)
-        
-        if inventory_contracts > 0.02:
-            ask_px = round(mid_price - 1.0, 1) # Immediate markdown to flatten inventory
+
+        # Guarantee true Maker quotes: strictly prevent crossing the book into Taker fills
+        bid_px = min(bid_px, round(mid_price - min_half_spread * 0.5, 1))
+        ask_px = max(ask_px, round(mid_price + min_half_spread * 0.5, 1))
+
+        allow_bid = True
+        allow_ask = True
+
+        # Hard inventory boundary checks
+        if inventory_contracts >= self.max_inventory:
             allow_bid = False
-            allow_ask = True
-        elif inventory_contracts < -0.02:
-            bid_px = round(mid_price + 1.0, 1) # Immediate markup to cover short
-            allow_bid = True
+        if inventory_contracts <= -self.max_inventory:
             allow_ask = False
-        else:
-            allow_bid = (inventory_contracts < self.max_inventory) and (p_tox_down < 0.80)
-            allow_ask = (inventory_contracts > -self.max_inventory) and (p_tox_up < 0.80)
+
+        # Toxicity circuit breaker (lowered to 0.65 for strict adverse selection defense)
+        if p_tox_down >= 0.65:
+            allow_bid = False
+        if p_tox_up >= 0.65:
+            allow_ask = False
+
+        # ADX Macro Trend Defense: prevent catching falling knives or shorting breakouts
+        if adx14 >= 28.0:
+            if trend_dir < 0:  # Confirmed strong downtrend: cut bids completely
+                allow_bid = False
+            elif trend_dir > 0:  # Confirmed strong uptrend: cut asks completely
+                allow_ask = False
+
+        # Post-Fill Cooldown: prevent cascade sweeps
+        if cooldown_bid:
+            allow_bid = False
+        if cooldown_ask:
+            allow_ask = False
 
         return {
             "r": r,
@@ -364,6 +442,12 @@ def main():
     last_candle_time = 0.0
     cached_ohlcv_feat = None
 
+    # State tracking for Post-Fill Cooldown & Queue Retention
+    last_pos_sz = 0.0
+    last_fill_time_bid = 0.0
+    last_fill_time_ask = 0.0
+    FILL_COOLDOWN_SEC = 5.0
+
     while running:
         loop_count += 1
         t_loop_start = time.time()
@@ -391,10 +475,23 @@ def main():
             # 3. Model Inference: Invoke LightGBM Drift & Adverse Selection Shock Models
             pred_drift, pred_tox_down, pred_tox_up = kernel.predict_ml_signals(ohlcv_feat, bar_ofi)
 
-            # 4. Fetch current real net inventory from OKX
+            # 4. Fetch current real net inventory from OKX & Detect Fills
             pos_list = client.get_positions(inst_type="SWAP", inst_id="BTC-USDT-SWAP")
             pos_sz = safe_float(pos_list[0].get("pos")) if pos_list else 0.0
             upl = safe_float(pos_list[0].get("upl")) if pos_list else 0.0
+
+            # Trigger post-fill cooldown on sudden position change
+            if loop_count > 1:
+                if pos_sz > last_pos_sz:
+                    last_fill_time_bid = time.time()
+                    log_msg(f"⚡ Fill detected on BUY side ({last_pos_sz} -> {pos_sz}), activating {FILL_COOLDOWN_SEC}s cooldown")
+                elif pos_sz < last_pos_sz:
+                    last_fill_time_ask = time.time()
+                    log_msg(f"⚡ Fill detected on SELL side ({last_pos_sz} -> {pos_sz}), activating {FILL_COOLDOWN_SEC}s cooldown")
+            last_pos_sz = pos_sz
+
+            cooldown_bid = (time.time() - last_fill_time_bid) < FILL_COOLDOWN_SEC
+            cooldown_ask = (time.time() - last_fill_time_ask) < FILL_COOLDOWN_SEC
 
             # 5. Avellaneda-Stoikov Mathematical Pricing & Optimal Half-Spread Calculation
             as_res = kernel.compute_as_grid_quotes(
@@ -403,7 +500,11 @@ def main():
                 inventory_contracts=pos_sz,
                 mu_drift=pred_drift,
                 p_tox_down=pred_tox_down,
-                p_tox_up=pred_tox_up
+                p_tox_up=pred_tox_up,
+                adx14=ohlcv_feat.get("adx14", 0.0),
+                trend_dir=ohlcv_feat.get("trend_dir", 0),
+                cooldown_bid=cooldown_bid,
+                cooldown_ask=cooldown_ask
             )
 
             r = as_res["r"]
@@ -412,64 +513,95 @@ def main():
             allow_bid = as_res["allow_bid"]
             allow_ask = as_res["allow_ask"]
 
-            # 6. High-Frequency Order Management & Trade Matching Execution
-            # Clean up pending orders using fast batch cancellation
+            # 6. Order Management with FIFO Queue Position Retention
+            # Price tolerance: do NOT cancel orders if target price has barely moved
+            PRICE_TOLERANCE_USDT = max(1.5, mid_price * 0.0001)
+
             pending_orders = client.get_pending_orders(inst_type="SWAP", inst_id="BTC-USDT-SWAP")
-            if pending_orders:
-                cancel_list = [{"instId": "BTC-USDT-SWAP", "ordId": p.get("ordId")} for p in pending_orders if p.get("ordId")]
+            active_bid_order = None
+            active_ask_order = None
+            orders_to_cancel = []
+
+            for p in pending_orders:
+                side = p.get("side")
+                px = safe_float(p.get("px"))
+                ord_id = p.get("ordId")
+                if side == "buy":
+                    if not allow_bid or abs(px - bid_px) > PRICE_TOLERANCE_USDT:
+                        orders_to_cancel.append({"instId": "BTC-USDT-SWAP", "ordId": ord_id})
+                    else:
+                        active_bid_order = p
+                elif side == "sell":
+                    if not allow_ask or abs(px - ask_px) > PRICE_TOLERANCE_USDT:
+                        orders_to_cancel.append({"instId": "BTC-USDT-SWAP", "ordId": ord_id})
+                    else:
+                        active_ask_order = p
+
+            if orders_to_cancel:
                 try:
-                    client.cancel_batch_orders(cancel_list)
+                    client.cancel_batch_orders(orders_to_cancel)
                 except Exception:
                     pass
 
             action_desc = []
             now_ms = int(time.time() * 1000)
 
-            # Post Asymmetric Two-Sided Limit Quotes
+            # Post Asymmetric Two-Sided Limit Quotes (Post-Only)
             if allow_bid:
-                cl_id_bid = f"asb{now_ms}"[-32:]
-                res_bid = client.place_order(
-                    inst_id="BTC-USDT-SWAP",
-                    td_mode="cross",
-                    side="buy",
-                    ord_type="post_only",
-                    px=str(bid_px),
-                    sz=kernel.lot_sz,
-                    cl_ord_id=cl_id_bid
-                )
-                if res_bid.get("code") == "0":
-                    action_desc.append(f"BID_POST({bid_px})")
-                    ord_data = res_bid.get("data", [{}])[0]
-                    # 严格真实记账：挂单仅记录为活动挂单，绝不作为成交追加！
-                    action_desc.append(f"BID_ORDER_OPEN({ord_data.get('ordId')})")
+                if active_bid_order:
+                    action_desc.append(f"BID_RETAINED_QUEUE({safe_float(active_bid_order.get('px'))})")
                 else:
-                    action_desc.append(f"BID_FAIL({res_bid.get('msg')})")
+                    cl_id_bid = f"asb{now_ms}"[-32:]
+                    res_bid = client.place_order(
+                        inst_id="BTC-USDT-SWAP",
+                        td_mode="cross",
+                        side="buy",
+                        ord_type="post_only",
+                        px=str(bid_px),
+                        sz=kernel.lot_sz,
+                        cl_ord_id=cl_id_bid
+                    )
+                    if res_bid.get("code") == "0":
+                        action_desc.append(f"BID_POST({bid_px})")
+                        ord_data = res_bid.get("data", [{}])[0]
+                        action_desc.append(f"BID_ORDER_OPEN({ord_data.get('ordId')})")
+                    else:
+                        action_desc.append(f"BID_FAIL({res_bid.get('msg')})")
             else:
-                reason = "MAX_INV" if pos_sz >= kernel.max_inventory else "TOXIC_DOWN_PROTECT"
+                reason = "MAX_INV" if pos_sz >= kernel.max_inventory else (
+                    "TOXIC_DOWN_PROTECT" if pred_tox_down >= 0.65 else (
+                        "ADX_TREND_DOWN" if ohlcv_feat.get("adx14", 0) >= 28 and ohlcv_feat.get("trend_dir", 0) < 0 else "COOLDOWN"
+                    )
+                )
                 action_desc.append(f"BID_CUT({reason})")
 
             if allow_ask:
-                cl_id_ask = f"asa{now_ms}"[-32:]
-                res_ask = client.place_order(
-                    inst_id="BTC-USDT-SWAP",
-                    td_mode="cross",
-                    side="sell",
-                    ord_type="post_only",
-                    px=str(ask_px),
-                    sz=kernel.lot_sz,
-                    cl_ord_id=cl_id_ask
-                )
-                if res_ask.get("code") == "0":
-                    action_desc.append(f"ASK_POST({ask_px})")
-                    ord_data = res_ask.get("data", [{}])[0]
-                    # 严格真实记账：挂单仅记录为活动挂单，绝不作为成交追加！
-                    action_desc.append(f"ASK_ORDER_OPEN({ord_data.get('ordId')})")
+                if active_ask_order:
+                    action_desc.append(f"ASK_RETAINED_QUEUE({safe_float(active_ask_order.get('px'))})")
                 else:
-                    action_desc.append(f"ASK_FAIL({res_ask.get('msg')})")
+                    cl_id_ask = f"asa{now_ms}"[-32:]
+                    res_ask = client.place_order(
+                        inst_id="BTC-USDT-SWAP",
+                        td_mode="cross",
+                        side="sell",
+                        ord_type="post_only",
+                        px=str(ask_px),
+                        sz=kernel.lot_sz,
+                        cl_ord_id=cl_id_ask
+                    )
+                    if res_ask.get("code") == "0":
+                        action_desc.append(f"ASK_POST({ask_px})")
+                        ord_data = res_ask.get("data", [{}])[0]
+                        action_desc.append(f"ASK_ORDER_OPEN({ord_data.get('ordId')})")
+                    else:
+                        action_desc.append(f"ASK_FAIL({res_ask.get('msg')})")
             else:
-                reason = "MIN_INV" if pos_sz <= -kernel.max_inventory else "TOXIC_UP_PROTECT"
+                reason = "MIN_INV" if pos_sz <= -kernel.max_inventory else (
+                    "TOXIC_UP_PROTECT" if pred_tox_up >= 0.65 else (
+                        "ADX_TREND_UP" if ohlcv_feat.get("adx14", 0) >= 28 and ohlcv_feat.get("trend_dir", 0) > 0 else "COOLDOWN"
+                    )
+                )
                 action_desc.append(f"ASK_CUT({reason})")
-
             # 7. Write telemetry status and recent fills
                         # Query real account fills to count true executed trades
             try:

@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.backup_local_research/
+logs/
+*.env
