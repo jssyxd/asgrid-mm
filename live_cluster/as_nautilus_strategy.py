@@ -20,13 +20,13 @@ class NautilusAvellanedaV2MMStrategy:
 
     def __init__(
         self,
-        risk_aversion_gamma: float = 0.0451,
+        risk_aversion_gamma: float = 3.00,  # 微账户 (30 USDT) 激进风险厌恶，杜绝单边抗单
         order_intensity_kappa: float = 2.1346,
-        lot_sz: str = "0.01",
-        max_inventory: float = 5.0,  # 5 档
-        min_spread_bps: float = 8.0,  # 8 bps
-        maker_fee: float = 0.0002,    # 0.02%
-        taker_fee: float = 0.0005,    # 0.05%
+        lot_sz: str = "0.01",               # 最小 0.01 张 (0.0001 BTC, 约 $8.1 名义流水)
+        max_inventory: float = 0.05,        # 最大 0.05 张 (5 笔 0.01，占用约 $13.50 保证金，占本金 45%)
+        min_spread_bps: float = 8.0,        # 强制双边价差 >= 8.0 bps 覆盖双边 4 bps 成本 2.0x
+        maker_fee: float = 0.0002,          # 0.02%
+        taker_fee: float = 0.0005,          # 0.05%
         contract_value_btc: float = 0.01
     ):
         self.gamma = risk_aversion_gamma

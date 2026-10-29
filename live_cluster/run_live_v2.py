@@ -126,9 +126,10 @@ def main():
     ws_mgr.start()
     
     strategy = NautilusAvellanedaV2MMStrategy(
-        lot_sz="0.01",  # 0.01 contract (~0.0001 BTC, ~$7 notional for 30U capital)
-        max_inventory=5.0,
-        min_spread_bps=8.0,
+        lot_sz="0.01",  # 0.01 张 (0.0001 BTC, 约 $8.1 名义流水)
+        max_inventory=0.05,  # 最大 0.05 张，占用约 $13.50 保证金，占 30U 本金 45%
+        min_spread_bps=8.0,  # 强制总价差 >= 8.0 bps
+        risk_aversion_gamma=3.00,  # 微账户专属高风险厌恶
         contract_value_btc=0.01
     )
     
@@ -186,55 +187,81 @@ def main():
             allow_bid = quote_res["allow_bid"]
             allow_ask = quote_res["allow_ask"]
             
-            # 5. Active Order Management: Cancel old quotes & post new quotes
+            # 5. 队列感知订单生命周期管理 (Queue Priority Preservation)
             pending = client.get_pending_orders(inst_type="SWAP", inst_id="BTC-USDT-SWAP")
-            if pending:
-                cancel_list = [{"instId": "BTC-USDT-SWAP", "ordId": p.get("ordId")} for p in pending if p.get("ordId")]
+            existing_buy = None
+            existing_sell = None
+            cancel_list = []
+            
+            for p in pending:
+                side_p = p.get("side", "").lower()
+                px_p = float(p.get("px", 0))
+                ord_id = p.get("ordId")
+                
+                # 检查现有买单：若在允许报价且偏离 < 1.0 USD，保留排队优势！
+                if side_p == "buy":
+                    if allow_bid and abs(px_p - bid_px) <= 1.0:
+                        existing_buy = p
+                    else:
+                        cancel_list.append({"instId": "BTC-USDT-SWAP", "ordId": ord_id})
+                elif side_p == "sell":
+                    if allow_ask and abs(px_p - ask_px) <= 1.0:
+                        existing_sell = p
+                    else:
+                        cancel_list.append({"instId": "BTC-USDT-SWAP", "ordId": ord_id})
+                        
+            if cancel_list:
                 try:
                     client.cancel_batch_orders(cancel_list)
-                except Exception as e:
+                except Exception:
                     pass
                     
             now_ms = int(time.time() * 1000)
             actions = []
             
-            # Post Maker Limit Quotes (Post-Only)
+            # 买单：仅在无排队中买单时才 Post-Only 挂单
             if allow_bid:
-                cl_id_bid = f"asb{now_ms}"[-32:]
-                res_b = client.place_order(
-                    inst_id="BTC-USDT-SWAP",
-                    td_mode="cross",
-                    side="buy",
-                    ord_type="post_only",
-                    px=str(bid_px),
-                    sz=strategy.lot_sz,
-                    cl_ord_id=cl_id_bid
-                )
-                if res_b.get("code") == "0":
-                    actions.append(f"BID_POST({bid_px})")
+                if existing_buy:
+                    actions.append(f"BID_QUEUE_HOLD({existing_buy.get('px')})")
                 else:
-                    actions.append(f"BID_REJ({res_b.get('msg')})")
+                    cl_id_bid = f"asb{now_ms}"[-32:]
+                    res_b = client.place_order(
+                        inst_id="BTC-USDT-SWAP",
+                        td_mode="cross",
+                        side="buy",
+                        ord_type="post_only",
+                        px=str(bid_px),
+                        sz=strategy.lot_sz,
+                        cl_ord_id=cl_id_bid
+                    )
+                    if res_b.get("code") == "0":
+                        actions.append(f"BID_POST({bid_px})")
+                    else:
+                        actions.append(f"BID_REJ({res_b.get('msg')})")
             else:
                 actions.append("BID_CUT")
                 
+            # 卖单：仅在无排队中卖单时才 Post-Only 挂单
             if allow_ask:
-                cl_id_ask = f"asa{now_ms}"[-32:]
-                res_a = client.place_order(
-                    inst_id="BTC-USDT-SWAP",
-                    td_mode="cross",
-                    side="sell",
-                    ord_type="post_only",
-                    px=str(ask_px),
-                    sz=strategy.lot_sz,
-                    cl_ord_id=cl_id_ask
-                )
-                if res_a.get("code") == "0":
-                    actions.append(f"ASK_POST({ask_px})")
+                if existing_sell:
+                    actions.append(f"ASK_QUEUE_HOLD({existing_sell.get('px')})")
                 else:
-                    actions.append(f"ASK_REJ({res_a.get('msg')})")
+                    cl_id_ask = f"asa{now_ms}"[-32:]
+                    res_a = client.place_order(
+                        inst_id="BTC-USDT-SWAP",
+                        td_mode="cross",
+                        side="sell",
+                        ord_type="post_only",
+                        px=str(ask_px),
+                        sz=strategy.lot_sz,
+                        cl_ord_id=cl_id_ask
+                    )
+                    if res_a.get("code") == "0":
+                        actions.append(f"ASK_POST({ask_px})")
+                    else:
+                        actions.append(f"ASK_REJ({res_a.get('msg')})")
             else:
                 actions.append("ASK_CUT")
-                
             # 6. Status and fills persistence
             status_data = {
                 "service_id": "07_as_grid_accountbot3",
