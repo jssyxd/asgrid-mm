@@ -432,7 +432,7 @@ def main():
                     inst_id="BTC-USDT-SWAP",
                     td_mode="cross",
                     side="buy",
-                    ord_type="limit",
+                    ord_type="post_only",
                     px=str(bid_px),
                     sz=kernel.lot_sz,
                     cl_ord_id=cl_id_bid
@@ -440,7 +440,7 @@ def main():
                 if res_bid.get("code") == "0":
                     action_desc.append(f"BID_POST({bid_px})")
                     ord_data = res_bid.get("data", [{}])[0]
-                    kernel.total_matched_trades += 1
+                    # order placed, not filled yet
                     recent_fills.append({
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "side": "BUY",
@@ -464,7 +464,7 @@ def main():
                     inst_id="BTC-USDT-SWAP",
                     td_mode="cross",
                     side="sell",
-                    ord_type="limit",
+                    ord_type="post_only",
                     px=str(ask_px),
                     sz=kernel.lot_sz,
                     cl_ord_id=cl_id_ask
@@ -472,7 +472,7 @@ def main():
                 if res_ask.get("code") == "0":
                     action_desc.append(f"ASK_POST({ask_px})")
                     ord_data = res_ask.get("data", [{}])[0]
-                    kernel.total_matched_trades += 1
+                    # order placed, not filled yet
                     recent_fills.append({
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "side": "SELL",
@@ -491,6 +491,16 @@ def main():
                 action_desc.append(f"ASK_CUT({reason})")
 
             # 7. Write telemetry status and recent fills
+                        # Query real account fills to count true executed trades
+            try:
+                bills_res = client._sign_and_request('GET', '/api/v5/account/bills', {'instType': 'SWAP', 'limit': '20'})
+                real_bills = bills_res.get('data', [])
+                valid_trades = [b for b in real_bills if b.get('subType') in ['1', '2']]
+                if valid_trades:
+                    kernel.total_matched_trades = len(valid_trades)
+            except Exception:
+                pass
+
             status = {
                 "service_id": "03_as_grid",
                 "strategy_name": "012_avellaneda_grid_ml_ofi_toxic",

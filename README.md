@@ -1,92 +1,86 @@
-# 策略 012：外汇与微观高频数学做市网格 (Avellaneda-Stoikov ML Grid)
+# asgrid-mm: 做市商 (Market Maker) 刷量与返佣套利执行体系
 
-- **策略编号**：012
-- **策略名称**：`avellaneda_grid`
-- **执行框架**：NautilusTrader 纳秒事件驱动状态机 + Numba JIT 高频微观做市内核
-- **交易品种**：BTC 永续合约 (`BTCUSDT-PERP.BINANCE`)
-- **执行时间框架**：1 分钟高频 K 线 / L2 逐笔订单簿深度流 (LOB Depth20)
-- **研发状态**：🏆 **3 年全周期高保真仿真通过，生产认证就绪 (Production Certified)**
+本仓库专为 **做市商 (Market Maker) 刷量导向、交易手续费返佣套利、积分所空投挖矿** 设计。
+系统基于 Avellaneda-Stoikov 微观结构高频做市模型，结合 L2 订单簿深度与 LightGBM 毒性订单流保护，实现大吞吐量被动流动性挂单。
 
 ---
 
-## ⚡ 核心实战性能总览 (2023-01-01 至 2026-02-14，共 1,636,229 根 1m 高频 K 线)
+## 核心定位：做市商刷量导向 (Volume & Rebate Mining)
 
-所有指标均基于经过治理的 3 年连续数据湖、计入真实 Maker 手续费与滑点摩擦测算：
-
-| 核心评估指标项 | 1. 传统对称网格 (Naive Grid) | 2. 经典 AS 网格 (纯存货倾斜) | **3. 012 ML-Enhanced AS (本系统)** | 优势与防御成效 |
-| :--- | :---: | :---: | :---: | :---: |
-| **3年累计净利润** | +$169,208.30 | +$927,680.43 | **+$810,846.41** | **较初始 $100k 翻 8.1 倍** |
-| **全周期总净回报率** | +169.21% | +927.68% | **+810.85%** | 稳健复利推进 |
-| **最大历史回撤 (Max DD)**| 2.21% | 0.46% | **0.33% (极低回撤)** | **较传统网格降低 85.1% 回撤风险** |
-| **全周期日夏普比率** | 4.85 | 23.62 | **22.87** | 高频做市稳健性极其突出 |
-| **3年累计被动撮合成交** | 22,053 笔 | 1,147,191 笔 | **1,137,495 笔** | 日均撮合 ~1,038 笔 |
-| **逆向选择大单避险撤单** | 0 次 (被动接飞刀) | 0 次 (无毒性预警) | **6,338 次 (成功避险)** | **有效躲过暴跌暴涨第一波穿盘** |
+本策略不追求单边方向性收益，而是追求在维持极低价格敞口风险的前提下，最大化制造有效交易量（Volume Generation）。
+核心变现路径为：
+1. **交易所做市商负费率返佣 (Maker Fee Rebate)**；
+2. **新兴交易所与 DEX 积分交易挖矿 (Trade Mining / Points Farming)**；
+3. **项目方做市服务与流动性外包支持 (Liquidity Provision Partnership)**。
 
 ---
 
-## 🛡️ 极端黑天鹅事件风控与做市防御检验
+## 一、 如何对接合作做市商与获取做市扶持？
 
-1. **2024-08-05 日元套息拆仓引发的单日 -18.72% 闪崩黑天鹅**：
-   - 比特币由 \$60,300 暴跌至 \$49,013；
-   - 传统网格在此类单边暴跌中因无约束补仓而承受巨大浮亏；
-   - 本策略通过 `P_toxic_down >= 0.65` 瞬时切断买单，仅允许挂卖单降库存，回撤仅 **0.28%**，平稳渡过危机。
-2. **2023-03-10 硅谷银行 (SVB) 倒闭与 USDC 脱锚冲击 (-11.07%)**：
-   - 帕金森高频波动率飙升超过中位数 2.5 倍，触发 `VOLATILITY_EXPANSION`；
-   - 最优价差瞬间拉宽 250%，避开流动性真空踩踏。
-3. **高频做市摩擦与手续费覆盖能力**：
-   - 每日平均成交 ~51.9 BTC（约 \$310 万名义流水）；
-   - 按 1.0 bps Maker 费率计提每日摩擦支出约 \$310；
-   - 4.0 bps 基础半价差产生的做市毛利约 \$1,240 / 天；
-   - **做市毛利对手续费支出形成了 4.0 倍的安全覆盖率**，物理摩擦完全被价差吸收。
+大型量化团队与做市机构通常有专门的做市合作计划，普通交易者可以通过以下步骤接入：
+
+### 1. 达到 VIP / 做市商准入门槛
+- 各大中心化交易所（如 OKX、Binance、Bybit、Gate、Bitget）均设有 VIP 做市商等级。
+- **做市商特权**：Maker 费率通常为 **负费率**（如 -0.005% 至 -0.015%），挂单被撮合成交不仅不收手续费，交易所反而向做市商支付现金补贴。
+- **免审核绿通策略**：若已有其他平台 VIP 证明（如 Binance VIP 3），可直接向目标交易所商务申请 30 至 60 天的 **VIP 等级体验期（Status Match）**，直接享受最高档做市负费率。
+
+### 2. 项目方与做市商联名合作 (KOL / Agency Volume)
+- 许多新上线代币项目方急需维持盘口深度与成交量，以满足 CoinMarketCap、CoinGecko 或头部 CEX 上币的活跃度要求。
+- 可以使用本系统的微观做市脚本，配置中性价差（Spread = 5~10 bps），为项目方在指定币对提供被动双边深度，收取固定的做市月费或按成交量提成。
 
 ---
 
-## ☁️ Kaggle 真实云端训练记录与 Checkpoint 存证
+## 二、 优质返佣交易所与积分交易所精选名单
 
-- **Kaggle 活跃内核**：
-  [`https://www.kaggle.com/code/opclown1/btc-as-lob-mm-trainer`](https://www.kaggle.com/code/opclown1/btc-as-lob-mm-trainer)
-- **运行状态**：`KernelWorkerStatus.COMPLETE`
-- **本地 Checkpoint 存证**：`checkpoints/as_mm_checkpoint.json`
-  - 风险厌恶系数 $\gamma = 0.0451$
-  - 流动性密度系数 $\kappa = 2.1346$
-  - 漂移修正系数 $\alpha_{\text{drift}} = 0.5563$
-  - 毒性惩罚系数 $\beta_{\text{toxic}} = 0.9544$
+做市刷量策略的核心瓶颈是**手续费摩擦**。必须在以下两类平台上运行方能产生正向净收益：
 
----
+### 1. 负费率 / 极高返佣的头部中心化交易所 (CEX)
+- **OKX 做市商计划 (OKX MM Program)**：
+  - 合约做市商最高享受 -0.015% 的挂单返现。
+  - 支持高频 API、每秒上百次并发下单、批量撤单接口（`cancel-batch-orders`）。
+- **Gate.io / Bitget 做市商体系**：
+  - 对中小资金做市商准入门槛相对较低（月交易量达 500 万美元即可申请 Maker 零费率或轻微负费率）。
+- **Bybit 做市商通道**：
+  - 提供专属的低延迟 WebSocket 专线与反洗钱绿名单支持。
 
-## 📁 模块架构与文件清单
-
-```
-012_avellaneda_grid/
-├── README.md                                    # 📖 本技术规格说明书
-├── THEORY_PAPERS.md                             # 📚 arXiv 经典论文索引 (Avellaneda-Stoikov 2008)
-├── KAGGLE_RESOURCES.md                          # ☁ Kaggle 关联高赞竞赛与 LOB 数据资源
-├── src/                                         # ⚡ 核心代码库
-│   ├── as_ml_engine.py                         # 机器学习增强做市引擎 (保留价格+最优价差+毒性断路器)
-│   ├── as_risk_guard.py                        # 多重硬风控看门狗 (回撤熔断+名义敞口限额+波动率激增)
-│   ├── as_nautilus_strategy.py                 # NautilusTrader 生产级事件驱动做市策略实现
-│   └── avellaneda_stoikov_engine.py            # 基础数学解析模型
-├── checkpoints/                                 # 🧬 Kaggle 训练下载的 Checkpoint
-│   └── as_mm_checkpoint.json                   # 包含最优 AS 参数与样本外盲测指标
-├── reports/                                     # 📊 交互式单页 HTML 报告
-│   └── as_market_making_3year_report.html       # 3年全周期仿真回测报告 (含黑天鹅抽样明细)
-├── trades/                                      # 📜 逐笔明细数据表
-│   └── btc_as_black_swan_20240805_trades.csv    # 2024-08-05 黑天鹅期间 15,455 笔逐笔成交表
-├── tests/                                       # 🧪 自动化测试套件
-│   └── test_012_components_smoke.py            # 4 项核心组件单元与风控断言冒烟测试
-└── kaggle_trainer/                              # ☁ Kaggle 云端训练代码副本
-    ├── kernel-metadata.json
-    └── trainer.py                               # 包含 18,181 根长周期数据无损打包与 LightGBM 训练
-```
+### 2. 积分所与永续 DEX 交易挖矿 (Points Farming / Airdrop DEX)
+在去中心化衍生品交易所（Perp DEX）上，刷量做市商是获取代币空投和交易奖励的核心主力：
+- **Hyperliquid (HL)**：
+  - 拥有极深的原生 L1 订单簿与零 Gas 撮合环境。
+  - 提供 Maker 费用返佣及高额做市积分（Hyperliquid Points）。
+- **Aevo / Drift Protocol / Orderly Network**：
+  - 采用订单簿架构，对双边挂单深度提供交易竞赛奖励与代币空投补贴。
+- **Paradex / dYdX v4**：
+  - 拥有专门的流动性提供激励池（LP Rewards），按挂单距中间价的深度和持续时间自动结算代币奖励。
 
 ---
 
-## 🛠 本地冒烟测试复现命令
+## 三、 执行架构与核心防坑规范
+
+### 1. 强制只做 Maker (Post-Only Enforced)
+代码中所有限价单必须强制启用 `ordType="post_only"`。
+当订单可能与对手方挂单直接撮合时，交易所会主动取消该挂单，绝不以 Taker 身份成交，避免被收取高达 0.05% 的吃单惩罚性手续费。
+
+### 2. 智能改单取代暴力重挂 (Modify Order Protocol)
+避免使用“全部撤单再全量重挂”的原始做法，改用 OKX 的 `amend-order` 接口直接调整价格。
+保留原单在撮合队列中的优先位置，降低 API 频控消耗与被恶意插队的风险。
+
+### 3. 双边非对称价差与毒性避险 (OFI + Toxic Breaker)
+通过 Cont-Kukanov-Stoikov 订单流不平衡量（OFI）结合 LightGBM 毒性预测模型：
+- 当识别到大单连续下砸（$P_{\text{toxic\_down}} \ge 0.70$）时，毫秒级切断买单，防止被动接飞刀；
+- 当市场平稳震荡时，迅速贴近盘口双边报价，最大化吞吐刷量流水。
+
+---
+
+## 四、 自动化实盘运行指南
 
 ```bash
-# 激活环境
-source /home/da/.venvs/quant/bin/activate
+# 1. 配置实盘 API 密钥与环境变量
+cp live_cluster/config/okx_credentials.env.example live_cluster/config/okx_credentials.env
 
-# 运行自动化冒烟测试
-python tests/test_012_components_smoke.py
+# 2. 启动 Docker 做市商微服务集群
+cd live_cluster && docker compose up -d
+
+# 3. 实时查看做市挂单与撮合流水
+docker logs -f nautilus_vps_003_as_grid --tail 30
 ```
