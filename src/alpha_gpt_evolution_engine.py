@@ -154,16 +154,49 @@ Return ONLY a valid JSON object with keys: gamma_risk_aversion, kappa_order_inte
             except Exception:
                 pass
                 
-        np.random.seed(42)
-        n_bars = 5000
-        close = 80000.0 + np.cumsum(np.random.randn(n_bars) * 10.0)
-        high = close + np.abs(np.random.randn(n_bars) * 15.0)
-        low = close - np.abs(np.random.randn(n_bars) * 15.0)
-        gk_vol = np.abs(np.random.randn(n_bars) * 0.05 + 0.3)
-        mu_drift = np.random.randn(n_bars) * 0.5
-        p_tox_d = np.clip(np.random.rand(n_bars), 0.0, 1.0)
-        p_tox_u = np.clip(np.random.rand(n_bars), 0.0, 1.0)
-        
+        # Load real BTC market data (strictly eliminates synthetic Gaussian white-noise fitness distortion)
+        real_data_path = self.data_path
+        if not os.path.exists(real_data_path) or not real_data_path.endswith('.parquet'):
+            cand_paths = [
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "../data_btc_1m_real.parquet")),
+                "/home/da/桌面/database/03_governed_lake/v2_parquet_lake/crypto/high_frequency_lob/BTCUSDT/BTCUSDT_1m_3years_governed.parquet"
+            ]
+            for p in cand_paths:
+                if os.path.exists(p):
+                    real_data_path = p
+                    break
+
+        if os.path.exists(real_data_path):
+            print(f"Loading real empirical market bars from {real_data_path} for fitness evaluation...")
+            df = pd.read_parquet(real_data_path)
+            # Take sample window up to 8000 bars for fast evolutionary iterations
+            df_sample = df.iloc[-8000:].reset_index(drop=True)
+            close = df_sample['close'].values.astype(np.float64)
+            high = df_sample['high'].values.astype(np.float64)
+            low = df_sample['low'].values.astype(np.float64)
+            
+            if 'garman_klass_vol' in df_sample.columns:
+                gk_vol = df_sample['garman_klass_vol'].values.astype(np.float64)
+            else:
+                log_hl = np.log(np.maximum(high, 1e-6) / np.maximum(low, 1e-6))
+                gk_vol = np.sqrt(pd.Series((log_hl ** 2) / (4.0 * math.log(2.0))).rolling(20, min_periods=1).mean().bfill().values * (365 * 1440))
+                
+            # Causal drift & toxicity signals
+            s_c = pd.Series(close)
+            ma20 = s_c.rolling(20, min_periods=1).mean().values
+            atr_est = pd.Series(high - low).rolling(14, min_periods=1).mean().values
+            f_dev = (close - ma20) / np.maximum(atr_est, 0.05)
+            r1 = s_c.pct_change(1).fillna(0).values
+            mu_drift = np.clip(-0.45 * f_dev - 0.20 * r1, -2.0, 2.0)
+            
+            vol_median = float(np.median(gk_vol))
+            z_down = 1.8 * (gk_vol / (vol_median + 1e-9)) - 2.0
+            z_up = 1.8 * (gk_vol / (vol_median + 1e-9)) - 2.0
+            p_tox_d = 1.0 / (1.0 + np.exp(-np.clip(z_down, -10.0, 10.0)))
+            p_tox_u = 1.0 / (1.0 + np.exp(-np.clip(z_up, -10.0, 10.0)))
+            print(f"✔ Successfully loaded {len(close)} real BTC bars. Mean price: ${np.mean(close):,.2f}, Mean GK-Vol: {np.mean(gk_vol):.2%}")
+        else:
+            raise FileNotFoundError(f"Cannot find empirical BTC parquet data lake at {real_data_path}")
         best_fitness = -99999.0
         
         for gen in range(1, generations + 1):

@@ -107,39 +107,42 @@ def test_adaptive_parameters_micro_account():
     assert p_35u["min_spread_bps"] >= 4.0, "Half-spread must cover maker roundtrip fee (>= 4 bps)"
 
 def test_run_live_kernel_smoke():
-    """Exercises AvellanedaStoikovMLExecutionKernel with synthetic candles and order book."""
-    from live_cluster.run_live import AvellanedaStoikovMLExecutionKernel
+    """Exercises NautilusAvellanedaV2MMStrategy with real quoting and WebSocket fill event processing."""
+    from live_cluster.as_nautilus_strategy import NautilusAvellanedaV2MMStrategy
     
-    kernel = AvellanedaStoikovMLExecutionKernel()
-    kernel._load_parameters(equity_usd=35.0)
-    
-    # Synthetic 30 1m candles
-    base_px = 65000.0
-    candles = []
-    for i in range(30):
-        px = base_px + (i - 15) * 5.0
-        candles.append([str(1700000000 + i * 60), str(px), str(px + 10), str(px - 10), str(px + 2), "100.0"])
-    
-    ohlcv_feat = kernel.compute_ohlcv_features(candles)
-    assert "adx14" in ohlcv_feat
-    assert "trend_dir" in ohlcv_feat
-    assert ohlcv_feat["adx14"] >= 0.0
-    
-    # Compute AS quotes with ADX and smooth skew
-    quotes = kernel.compute_as_grid_quotes(
-        mid_price=65000.0,
-        gk_vol=ohlcv_feat["gk_vol"],
-        inventory_contracts=0.01,
-        mu_drift=0.0,
-        p_tox_down=0.2,
-        p_tox_up=0.2,
-        adx14=ohlcv_feat["adx14"],
-        trend_dir=ohlcv_feat["trend_dir"]
+    strategy = NautilusAvellanedaV2MMStrategy(
+        risk_aversion_gamma=0.35,
+        min_spread_bps=9.0,
+        lot_sz="0.01",
+        max_inventory=0.05
     )
-    assert quotes["bid_px"] < 65000.0
-    assert quotes["ask_px"] > 65000.0
-    assert quotes["ask_px"] - quotes["bid_px"] >= 65000.0 * 0.0004
-
+    
+    # Test quote computation
+    mid = 65000.0
+    quotes = strategy.compute_quotes(
+        mid_price=mid,
+        gk_vol=0.25,
+        rolling_ofi=0.5,
+        ma20_dev=0.1,
+        vol_median=0.25
+    )
+    assert quotes["bid_px"] < mid, "Bid price must be strictly below mid price"
+    assert quotes["ask_px"] > mid, "Ask price must be strictly above mid price"
+    assert (quotes["ask_px"] - quotes["bid_px"]) >= (mid * 0.00045), "Spread must strictly cover Maker fee hurdle"
+    assert quotes["allow_bid"] and quotes["allow_ask"]
+    
+    # Test Real WebSocket Fill Event Processing (eliminates code==0 fake fill bug)
+    assert strategy.inventory == 0.0
+    strategy.on_real_fill({
+        "side": "buy",
+        "fillPx": "65000.0",
+        "fillSz": "0.01",
+        "fee": "-0.13",
+        "feeCcy": "USDT"
+    })
+    assert math.isclose(strategy.inventory, 0.01, abs_tol=1e-5), "Inventory must accurately increment on real fill"
+    assert strategy.real_matched_trades == 1
+    assert len(strategy.recent_fills) == 1
 def test_risk_guard_circuit_breaker():
     guard = AvellanedaRiskGuard(max_drawdown_pct=0.08)
     

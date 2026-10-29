@@ -20,11 +20,11 @@ class NautilusAvellanedaV2MMStrategy:
 
     def __init__(
         self,
-        risk_aversion_gamma: float = 3.00,  # 微账户 (30 USDT) 激进风险厌恶，杜绝单边抗单
+        risk_aversion_gamma: float = 0.35,  # 校准后微账户平稳风险厌恶 (废除自杀式 3.0)
         order_intensity_kappa: float = 2.1346,
         lot_sz: str = "0.01",               # 最小 0.01 张 (0.0001 BTC, 约 $8.1 名义流水)
         max_inventory: float = 0.05,        # 最大 0.05 张 (5 笔 0.01，占用约 $13.50 保证金，占本金 45%)
-        min_spread_bps: float = 8.0,        # 强制双边价差 >= 8.0 bps 覆盖双边 4 bps 成本 2.0x
+        min_spread_bps: float = 9.0,        # 强制双边价差 >= 9.0 bps 覆盖双边 4 bps 成本 2.25x
         maker_fee: float = 0.0002,          # 0.02%
         taker_fee: float = 0.0005,          # 0.05%
         contract_value_btc: float = 0.01
@@ -73,9 +73,9 @@ class NautilusAvellanedaV2MMStrategy:
         inv_skew = (self.inventory * lot_float) * self.gamma * (sig ** 2) * mid_price * 0.0008
         r = mid_price - inv_skew + drift_adj
         
-        # 2. 显式手续费门槛约束 (总价差 >= 8.0 bps)
+        # 2. 显式手续费门槛约束 (总价差 >= 9.0 bps)
         base_half_spd = (1.0 / self.gamma) * math.log(1.0 + self.gamma / self.kappa) * (mid_price * 0.0004)
-        min_half_spd = mid_price * (self.min_spread_bps * 0.5 / 10000.0)  # 4.0 bps
+        min_half_spd = mid_price * (self.min_spread_bps * 0.5 / 10000.0)  # 4.5 bps
         base_half_spd = max(min_half_spd, base_half_spd)
         
         # 3. 波动率激增保护
@@ -88,11 +88,22 @@ class NautilusAvellanedaV2MMStrategy:
         is_toxic_down = (ofi_norm < -1.0 and ma20_dev < -0.6 and sig > vol_median)
         is_toxic_up = (ofi_norm > 1.0 and ma20_dev > 0.6 and sig > vol_median)
         
-        delta_ask = base_half_spd * (1.5 if is_toxic_up else 1.0)
-        delta_bid = base_half_spd * (1.5 if is_toxic_down else 1.0)
+        # 5. 平滑连续库存偏置 (杜绝阶跃式跨盘自残)
+        inv_ratio = float(np.clip(self.inventory / max(self.max_inventory, 1e-6), -1.0, 1.0))
+        inv_bias = inv_ratio * base_half_spd * 0.75
+        
+        delta_ask = base_half_spd * (1.5 if is_toxic_up else 1.0) - inv_bias
+        delta_bid = base_half_spd * (1.5 if is_toxic_down else 1.0) + inv_bias
+        
+        delta_bid = max(min_half_spd * 0.8, delta_bid)
+        delta_ask = max(min_half_spd * 0.8, delta_ask)
         
         bid_px = round(r - delta_bid, 1)
         ask_px = round(r + delta_ask, 1)
+        
+        # 保证严格 Maker 挂单，绝不跨越盘口中间价
+        bid_px = min(bid_px, round(mid_price - min_half_spd * 0.5, 1))
+        ask_px = max(ask_px, round(mid_price + min_half_spd * 0.5, 1))
         
         allow_bid = (self.inventory < self.max_inventory)
         allow_ask = (self.inventory > -self.max_inventory)
@@ -104,7 +115,6 @@ class NautilusAvellanedaV2MMStrategy:
         if is_toxic_up:
             allow_ask = False  # 暴涨切断卖单
             self.adverse_mitigations += 1
-            
         return {
             "r": round(r, 1),
             "bid_px": bid_px,

@@ -128,9 +128,8 @@ def main():
     strategy = NautilusAvellanedaV2MMStrategy(
         lot_sz="0.01",  # 0.01 张 (0.0001 BTC, 约 $8.1 名义流水)
         max_inventory=0.05,  # 最大 0.05 张，占用约 $13.50 保证金，占 30U 本金 45%
-        min_spread_bps=8.0,  # 强制总价差 >= 8.0 bps
-        risk_aversion_gamma=3.00,  # 微账户专属高风险厌恶
-        contract_value_btc=0.01
+        min_spread_bps=9.0,  # 强制总价差 >= 9.0 bps (半价差 >= 4.5 bps 覆盖双向 0.04% 成本)
+        risk_aversion_gamma=0.35,  # 校准后微账户平稳风险厌恶 (废除 3.00)
     )
     
     # Sync initial position from exchange
