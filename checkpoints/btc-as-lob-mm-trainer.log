@@ -1,0 +1,30 @@
+[{"stream_name":"stdout","time":15.769335117,"data":"Loaded 18181 sampled high-frequency micro bars on Kaggle.\n"}
+,{"stream_name":"stdout","time":16.051223405,"data":"ML models trained successfully. Drift std: 0.4929, ToxDown mean: 0.6910\n"}
+,{"stream_name":"stdout","time":18.165177405,"data":"✔ Checkpoint exported successfully to as_mm_checkpoint.json!\n"}
+,{"stream_name":"stdout","time":18.165207935,"data":"{\n"}
+,{"stream_name":"stdout","time":18.165212207,"data":"  \"model_name\": \"BTC-Avellaneda-Stoikov-Microstructure-Certified\",\n"}
+,{"stream_name":"stdout","time":18.165216488,"data":"  \"timestamp_utc\": \"2026-10-25T04:21:54Z\",\n"}
+,{"stream_name":"stdout","time":18.165220258,"data":"  \"optimal_as_parameters\": {\n"}
+,{"stream_name":"stdout","time":18.165224381,"data":"    \"gamma_risk_aversion\": 0.0451,\n"}
+,{"stream_name":"stdout","time":18.16522827,"data":"    \"kappa_order_intensity\": 2.1346,\n"}
+,{"stream_name":"stdout","time":18.165231548,"data":"    \"drift_alpha\": 0.5563,\n"}
+,{"stream_name":"stdout","time":18.165235329,"data":"    \"toxic_beta\": 0.9544,\n"}
+,{"stream_name":"stdout","time":18.165238936,"data":"    \"lot_size\": 0.05,\n"}
+,{"stream_name":"stdout","time":18.165242372,"data":"    \"maker_fee_bps\": 1.0,\n"}
+,{"stream_name":"stdout","time":18.165245825,"data":"    \"min_spread_bps\": 2.0\n"}
+,{"stream_name":"stdout","time":18.16524943,"data":"  },\n"}
+,{"stream_name":"stdout","time":18.165252444,"data":"  \"out_of_sample_metrics\": {\n"}
+,{"stream_name":"stdout","time":18.165256001,"data":"    \"oos_bars_count\": 5455,\n"}
+,{"stream_name":"stdout","time":18.165259879,"data":"    \"total_return_pct\": -5.03,\n"}
+,{"stream_name":"stdout","time":18.165263514,"data":"    \"max_drawdown_pct\": 19.27,\n"}
+,{"stream_name":"stdout","time":18.165280851,"data":"    \"total_trades\": 858,\n"}
+,{"stream_name":"stdout","time":18.16528557,"data":"    \"calmar_ratio\": -0.26\n"}
+,{"stream_name":"stdout","time":18.165289097,"data":"  }\n"}
+,{"stream_name":"stdout","time":18.165292194,"data":"}\n"}
+,{"stream_name":"stderr","time":22.741328398,"data":"/usr/local/lib/python3.13/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":22.741366917,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":23.210261155,"data":"/usr/local/lib/python3.13/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":23.210289985,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":24.393602004999998,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":26.16791002,"data":"[NbConvertApp] Writing 1006405 bytes to __results__.html\n"}
+]

@@ -1,0 +1,17 @@
+{
+  "id": "opclown1/btc-as-lob-mm-trainer",
+  "title": "BTC AS LOB MM Trainer",
+  "code_file": "trainer.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [
+    "finance",
+    "reinforcement-learning"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": []
+}

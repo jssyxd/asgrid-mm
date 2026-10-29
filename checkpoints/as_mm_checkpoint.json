@@ -1,0 +1,15 @@
+{
+  "model_name": "BTC-Avellaneda-Stoikov-AlphaGPT-Evolved",
+  "timestamp_utc": "2026-10-28T15:36:30Z",
+  "optimal_as_parameters": {
+    "gamma_risk_aversion": 0.0422,
+    "kappa_order_intensity": 1.8285,
+    "drift_alpha": 0.599,
+    "toxic_beta": 1.0982,
+    "min_spread_bps": 2.0
+  },
+  "evolution_metrics": {
+    "generations": 3,
+    "best_fitness": 6.1386
+  }
+}

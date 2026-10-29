@@ -1,0 +1,4 @@
+Strategy_Model,Final_Equity,Net_Profit_USD,Total_Return_Pct,Max_Drawdown_Pct,Sharpe_Ratio,Total_Fills,Adverse_Mitigations
+1. 传统对称网格 (Naive Grid),269208.3,169208.3,169.21,2.21,4.85,22053,0
+2. 经典 Avellaneda-Stoikov (纯存货倾斜),1027680.43,927680.43,927.68,0.46,23.62,1147191,0
+3. 012 ML-Enhanced AS (ML漂移+毒性避险),910846.41,810846.41,810.85,0.33,22.87,1137495,6338
