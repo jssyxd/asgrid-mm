@@ -18,7 +18,7 @@ class AvellanedaStoikovMLEngine:
         terminal_horizon: float = 1.0,
         max_inventory: float = 5.0,
         lot_size: float = 0.05,
-        min_spread_bps: float = 2.0,
+        min_spread_bps: float = 4.0,  # 强制半价差 >= 4.0 bps (总报价价差 >= 8.0 bps, 覆盖 Maker 0.02% 双向费率 2.0x)
         drift_alpha: float = 0.35,
         toxic_beta: float = 1.20,
     ):

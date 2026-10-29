@@ -39,8 +39,15 @@ class NautilusAvellanedaMMStrategy(Strategy):
 
     def on_bar(self, bar: Bar):
         self.current_mid = bar.close
-        # 保留价格与最优报价由底层 JIT / ML 引擎驱动
-        pass
+        # 动态保留价格与非对称做市报价逻辑
+        s = float(bar.close)
+        q = float(self.inventory)
+        r = s - (q * float(self.lot_size)) * self.gamma * (0.25 ** 2) * s * 0.0008
+        half_spread = max(s * 0.0004, (1.0 / self.gamma) * (s * 0.0004))
+        bid_price = round(r - half_spread, 1)
+        ask_price = round(r + half_spread, 1)
+        self.active_bid_order = bid_price
+        self.active_ask_order = ask_price
 
     def on_stop(self):
         self.cancel_all_orders(self.instrument_id)

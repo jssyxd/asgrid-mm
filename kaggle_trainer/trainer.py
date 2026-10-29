@@ -30,20 +30,19 @@ n = len(close)
 
 print(f"Loaded {n} sampled high-frequency micro bars on Kaggle.")
 
-# Feature Engineering
+# Causal Feature Engineering (Strictly no .bfill(), min_periods=1)
 s_c = pd.Series(close)
-ma20 = s_c.rolling(20).mean().bfill().values
+ma20 = s_c.rolling(20, min_periods=1).mean().values
 f_dev = (close - ma20) / np.maximum(atr14, 0.05)
-s_r1 = s_c.pct_change(1).fillna(0).values
-vol_ma = pd.Series(volume).rolling(20).mean().bfill().values
+s_r1 = s_c.pct_change(1).fillna(0.0).values
+vol_ma = pd.Series(volume).rolling(20, min_periods=1).mean().values
 vol_accel = np.clip(volume / (vol_ma + 1e-9), 0.01, 50.0)
 
-# Multi-Horizon Labels
-H = 5
+# Micro-Horizon Labels (H=1 immediate 1-minute execution bar)
+H = 1
 fwd_ret = (pd.Series(close).shift(-H).values - close) / np.maximum(atr14, 0.05)
-fwd_min = (pd.Series(low).rolling(H).min().shift(-H).values - close) / np.maximum(atr14, 0.05)
-fwd_max = (pd.Series(high).rolling(H).max().shift(-H).values - close) / np.maximum(atr14, 0.05)
-
+fwd_min = (pd.Series(low).shift(-H).values - close) / np.maximum(atr14, 0.05)
+fwd_max = (pd.Series(high).shift(-H).values - close) / np.maximum(atr14, 0.05)
 # Toxic Shocks: Down crash <= -1.8 ATR, Up surge >= 1.8 ATR
 y_toxic_down = (fwd_min <= -1.8).astype(np.int32)
 y_toxic_up = (fwd_max >= 1.8).astype(np.int32)
