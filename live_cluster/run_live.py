@@ -26,7 +26,6 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
 
-sys.path.append(os.path.dirname(__file__))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from gateway_okx_client import OKXGatewayClient
 from as_nautilus_strategy import NautilusAvellanedaV2MMStrategy
@@ -75,13 +74,14 @@ signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT, handle_shutdown)
 
 def compute_gk_vol(candles):
-    """Causal Garman-Klass Volatility without bfill or lookahead."""
+    """Causal Garman-Klass Volatility, MA20 Deviation, and ADX(14) Trend State."""
     arr = np.array(candles, dtype=object)
     arr = arr[::-1]  # oldest first
     open_ = arr[:, 1].astype(float)
     high = arr[:, 2].astype(float)
     low = arr[:, 3].astype(float)
     close = arr[:, 4].astype(float)
+    n = len(close)
     
     log_hl = np.log(np.maximum(high, 1e-6) / np.maximum(low, 1e-6))
     log_co = np.log(np.maximum(close, 1e-6) / np.maximum(open_, 1e-6))
@@ -97,8 +97,33 @@ def compute_gk_vol(candles):
     atr_approx = np.mean(high[-14:] - low[-14:]) if len(high) >= 14 else (cur_c * 0.002)
     ma20_dev = (cur_c - ma20) / max(atr_approx, 0.05)
     
-    return float(annual_gk), float(ma20_dev), cur_c
-
+    # Causal ADX(14) calculation
+    adx14 = 15.0
+    trend_dir = 0
+    if n >= 15:
+        tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+        delta_h = high[1:] - high[:-1]
+        delta_l = low[:-1] - low[1:]
+        plus_dm = np.where((delta_h > delta_l) & (delta_h > 0), delta_h, 0.0)
+        minus_dm = np.where((delta_l > delta_h) & (delta_l > 0), delta_l, 0.0)
+        
+        smooth_tr = pd.Series(tr).rolling(min(n-1, 14), min_periods=3).mean().bfill()
+        smooth_plus = pd.Series(plus_dm).rolling(min(n-1, 14), min_periods=3).mean().bfill()
+        smooth_minus = pd.Series(minus_dm).rolling(min(n-1, 14), min_periods=3).mean().bfill()
+        
+        plus_di = 100.0 * (smooth_plus / (smooth_tr + 1e-9))
+        minus_di = 100.0 * (smooth_minus / (smooth_tr + 1e-9))
+        dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
+        adx14 = float(dx.rolling(min(n-1, 14), min_periods=3).mean().bfill().iloc[-1])
+        curr_plus_di = float(plus_di.iloc[-1])
+        curr_minus_di = float(minus_di.iloc[-1])
+        
+        if curr_plus_di > curr_minus_di and cur_c > ma20:
+            trend_dir = 1
+        elif curr_minus_di > curr_plus_di and cur_c < ma20:
+            trend_dir = -1
+            
+    return float(annual_gk), float(ma20_dev), cur_c, float(adx14), int(trend_dir)
 def main():
     log_msg("=== Starting NautilusTrader Avellaneda-Stoikov V2 Live Service ===")
     creds = load_credentials()
@@ -143,7 +168,16 @@ def main():
     last_candle_fetch = 0.0
     cached_gk_vol = 0.25
     cached_ma20_dev = 0.0
+    cached_adx14 = 15.0
+    cached_trend_dir = 0
     vol_median = 0.25
+    recent_telemetry_history = []
+    
+    # Post-fill cooldown state
+    last_pos = strategy.inventory
+    last_fill_time_bid = 0.0
+    last_fill_time_ask = 0.0
+    FILL_COOLDOWN_SEC = 5.0
     
     time.sleep(2)  # Warm up WebSocket
     
@@ -157,11 +191,23 @@ def main():
                 strategy.on_real_fill(f)
                 log_msg(f"⭐ [REAL FILL CONFIRMED] {f['side']} {f['fillSz']} contracts @ {f['fillPx']} | Fee: {f['fee']} {f['feeCcy']}")
                 
+            # Post-fill cooldown trigger on inventory position change
+            if strategy.inventory > last_pos:
+                last_fill_time_bid = time.time()
+                log_msg(f"⚡ Fill detected on BUY side ({last_pos} -> {strategy.inventory}), activating {FILL_COOLDOWN_SEC}s cooldown")
+            elif strategy.inventory < last_pos:
+                last_fill_time_ask = time.time()
+                log_msg(f"⚡ Fill detected on SELL side ({last_pos} -> {strategy.inventory}), activating {FILL_COOLDOWN_SEC}s cooldown")
+            last_pos = strategy.inventory
+            
+            cooldown_bid = (time.time() - last_fill_time_bid) < FILL_COOLDOWN_SEC
+            cooldown_ask = (time.time() - last_fill_time_ask) < FILL_COOLDOWN_SEC
+            
             # 2. Update K-line features periodically (every 15s)
             if time.time() - last_candle_fetch >= 15.0:
                 candles = client.get_candles("BTC-USDT-SWAP", bar="1m", limit=30)
                 if candles:
-                    cached_gk_vol, cached_ma20_dev, last_close = compute_gk_vol(candles)
+                    cached_gk_vol, cached_ma20_dev, last_close, cached_adx14, cached_trend_dir = compute_gk_vol(candles)
                     last_candle_fetch = time.time()
                     
             # 3. Retrieve latest order book & OFI from WebSocket
@@ -173,13 +219,17 @@ def main():
                 
             rolling_ofi = ws_mgr.get_rolling_ofi()
             
-            # 4. Strategy pricing & quote calculation
+            # 4. Strategy pricing & quote calculation (with ADX and Cooldown)
             quote_res = strategy.compute_quotes(
                 mid_price=mid_px,
                 gk_vol=cached_gk_vol,
                 rolling_ofi=rolling_ofi,
                 ma20_dev=cached_ma20_dev,
-                vol_median=vol_median
+                vol_median=vol_median,
+                adx14=cached_adx14,
+                trend_dir=cached_trend_dir,
+                cooldown_bid=cooldown_bid,
+                cooldown_ask=cooldown_ask
             )
             
             bid_px = quote_res["bid_px"]
@@ -187,7 +237,8 @@ def main():
             allow_bid = quote_res["allow_bid"]
             allow_ask = quote_res["allow_ask"]
             
-            # 5. 队列感知订单生命周期管理 (Queue Priority Preservation)
+            # 5. 队列感知订单生命周期管理 (Queue Priority Preservation with dynamic tolerance)
+            PRICE_TOLERANCE_USDT = max(1.5, mid_px * 0.0001)
             pending = client.get_pending_orders(inst_type="SWAP", inst_id="BTC-USDT-SWAP")
             existing_buy = None
             existing_sell = None
@@ -198,19 +249,17 @@ def main():
                 px_p = float(p.get("px", 0))
                 ord_id = p.get("ordId")
                 
-                # 检查现有买单：若在允许报价且偏离 < 1.0 USD，保留排队优势！
+                # 检查现有买单：若在允许报价且偏离 <= PRICE_TOLERANCE_USDT，保留排队优势！
                 if side_p == "buy":
-                    if allow_bid and abs(px_p - bid_px) <= 1.0:
+                    if allow_bid and abs(px_p - bid_px) <= PRICE_TOLERANCE_USDT:
                         existing_buy = p
                     else:
                         cancel_list.append({"instId": "BTC-USDT-SWAP", "ordId": ord_id})
                 elif side_p == "sell":
-                    if allow_ask and abs(px_p - ask_px) <= 1.0:
+                    if allow_ask and abs(px_p - ask_px) <= PRICE_TOLERANCE_USDT:
                         existing_sell = p
                     else:
                         cancel_list.append({"instId": "BTC-USDT-SWAP", "ordId": ord_id})
-                        
-            if cancel_list:
                 try:
                     client.cancel_batch_orders(cancel_list)
                 except Exception:

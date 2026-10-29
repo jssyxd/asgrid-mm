@@ -58,9 +58,13 @@ class NautilusAvellanedaV2MMStrategy:
         gk_vol: float,
         rolling_ofi: float,
         ma20_dev: float,
-        vol_median: float
+        vol_median: float,
+        adx14: float = 0.0,
+        trend_dir: int = 0,
+        cooldown_bid: bool = False,
+        cooldown_ask: bool = False
     ) -> Dict[str, Any]:
-        """计算保留价格、最优非对称价差及挂单许可"""
+        """计算保留价格、最优非对称价差及挂单许可 (集成平滑库存、ADX强趋势过滤与成交后冷却)."""
         sig = max(0.10, gk_vol)
         
         # 1. 微观漂移与保留价格
@@ -115,16 +119,41 @@ class NautilusAvellanedaV2MMStrategy:
         if is_toxic_up:
             allow_ask = False  # 暴涨切断卖单
             self.adverse_mitigations += 1
+
+        # 6. ADX 强趋势宏观状态机：单边行情下禁止逆势接单
+        if adx14 >= 28.0:
+            if trend_dir < 0:  # 强空头暴跌大趋势：切断买单挂单，仅允许平多
+                allow_bid = False
+            elif trend_dir > 0:  # 强多头狂飙大趋势：切断卖单挂单，仅允许平空
+                allow_ask = False
+
+        # 7. 成交后单侧冷却守护：防止在巨鲸扫盘第一波连续被动接盘
+        if cooldown_bid:
+            allow_bid = False
+        if cooldown_ask:
+            allow_ask = False
+            
         return {
             "r": round(r, 1),
             "bid_px": bid_px,
             "ask_px": ask_px,
             "allow_bid": allow_bid,
             "allow_ask": allow_ask,
-            "is_toxic_down": is_toxic_down,
-            "is_toxic_up": is_toxic_up,
-            "vol_surge": vol_surge,
-            "base_half_spd_bps": round(base_half_spd / mid_price * 10000, 2)
+            "is_toxic_down": bool(is_toxic_down),
+            "is_toxic_up": bool(is_toxic_up),
+            "vol_surge": bool(vol_surge),
+            "adx14": round(float(adx14), 2),
+            "trend_dir": int(trend_dir),
+            "cooldown_bid": bool(cooldown_bid),
+            "cooldown_ask": bool(cooldown_ask),
+            "base_half_spd_bps": round(base_half_spd / mid_price * 10000, 2),
+            "mu_pred": round(float(mu_pred), 4),
+            "ofi_norm": round(float(ofi_norm), 4),
+            "inv_skew_usd": round(float(inv_skew), 2),
+            "drift_adj_usd": round(float(drift_adj), 2),
+            "base_half_spd_usd": round(float(base_half_spd), 2),
+            "delta_bid_usd": round(float(delta_bid), 2),
+            "delta_ask_usd": round(float(delta_ask), 2)
         }
 
     def on_real_fill(self, fill_event: Dict[str, Any]):
